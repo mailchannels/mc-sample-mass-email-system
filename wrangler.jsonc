@@ -1,0 +1,82 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mailchannels-mass-email-system",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "vars": {
+    "AUTH_MODE": "cloudflare-access",
+    "ALLOWED_EMAIL_DOMAIN": "example.com",
+    "ALLOWED_SENDER_DOMAINS": "example.com",
+    "WEBHOOK_VERIFY_SIGNATURES": "true",
+    "TRACKING_RETENTION_DAYS": "400",
+    "IMPORT_CHUNK_BYTES": "524288",
+    "CAMPAIGN_PAGE_SIZE": "250",
+    "EMAIL_RATE_LIMIT": "50"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "RATE_LIMITER", "class_name": "EmailRateLimiter" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["EmailRateLimiter"] }
+  ],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/webhooks/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mass-email-system",
+      "database_id": "replace-with-d1-database-id",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "CONTENT",
+      "bucket_name": "mass-email-system-content"
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "CAMPAIGN_QUEUE", "queue": "mass-email-campaigns" },
+      { "binding": "EMAIL_QUEUE", "queue": "mass-email-delivery" },
+      { "binding": "EVENT_QUEUE", "queue": "mass-email-events" }
+    ],
+    "consumers": [
+      {
+        "queue": "mass-email-campaigns",
+        "max_batch_size": 10,
+        "max_batch_timeout": 2,
+        "max_retries": 5,
+        "dead_letter_queue": "mass-email-campaigns-dlq",
+        "max_concurrency": 5
+      },
+      {
+        "queue": "mass-email-delivery",
+        "max_batch_size": 10,
+        "max_batch_timeout": 1,
+        "max_retries": 5,
+        "dead_letter_queue": "mass-email-delivery-dlq",
+        "max_concurrency": 10
+      },
+      {
+        "queue": "mass-email-events",
+        "max_batch_size": 100,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "mass-email-events-dlq",
+        "max_concurrency": 5
+      }
+    ]
+  },
+  "triggers": {
+    "crons": ["*/1 * * * *", "17 3 * * *"]
+  }
+}

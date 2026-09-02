@@ -1,0 +1,6 @@
+{
+  "name": "welcome",
+  "subject": "Welcome, {{firstName}}",
+  "text": "Hello {{firstName}},\n\nWelcome to {{company}}. Your plan is {{plan}}.",
+  "html": "<h1>Hello {{firstName}}</h1><p>Welcome to <strong>{{company}}</strong>. Your plan is {{plan}}.</p>"
+}
