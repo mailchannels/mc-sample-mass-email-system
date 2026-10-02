@@ -11,20 +11,31 @@
     "db:migrate:local": "wrangler d1 migrations apply mass-email-system --local",
     "db:migrate:remote": "wrangler d1 migrations apply mass-email-system --remote",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "dev:local": "npm run build && node scripts/local.mjs",
+    "test:integration": "vitest run test/tenancy.test.ts test/security.test.ts test/multitenancy-flows.test.ts test/resilience.test.ts test/fairness.test.ts test/oidc.test.ts test/operations.test.ts test/import-benchmark.test.ts",
+    "test:browser": "node scripts/browser-smoke.mjs"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "react": "latest",
-    "react-dom": "latest"
+    "@fontsource/montserrat": "5.3.0",
+    "@fontsource/roboto": "5.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "jose": "6.2.12",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "vite": "8.2.2"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest",
-    "typescript": "latest",
-    "vitest": "latest",
-    "wrangler": "latest"
+    "@cloudflare/workers-types": "5.20261002.1",
+    "@types/node": "26.6.4",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "esbuild": "0.28.1",
+    "miniflare": "5.20261001.0-alpha",
+    "playwright": "1.63.0",
+    "prettier": "3.9.9",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11",
+    "wrangler": "4.147.0"
   }
 }

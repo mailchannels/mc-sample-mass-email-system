@@ -1,172 +1,61 @@
-# MailChannels + Cloudflare Mass Email System
+# Multi-tenant email service
 
-A semantic Cloudflare-native implementation of AWS's [Sample Mass Email System](https://github.com/aws-samples/sample-mass-email-system). It preserves the original system's product shape—recipient CSVs, reusable templates, ad hoc sends, asynchronous campaigns, batching, attachments, and per-recipient monitoring—while replacing its service primitives:
+A three-tier email marketing service: platform staff manage resellers, hosting providers manage customer accounts, and customers manage their campaigns in a branded workspace. The implementation follows [the multi-tenancy plan](docs/multi-tenancy-plan.md) through Phase 6, with local Workers integration tests.
 
-| AWS sample | This project |
-|---|---|
-| Amazon SES | MailChannels Email API `send-async`, native Mustache rendering, unsubscribe handling, suppressions, and signed webhooks |
-| Lambda + API Gateway | Cloudflare Workers |
-| Step Functions + EventBridge | Queue job state stored in D1, Cloudflare Queues, and Cron Triggers |
-| SQS + dead-letter queues | Cloudflare Queues + configured DLQs |
-| DynamoDB | Cloudflare D1 |
-| S3 | Cloudflare R2 |
-| Cognito | Cloudflare Access |
-| WAF + CloudFront | Cloudflare WAF/CDN + Workers Assets |
-| SES send-rate controls | A Durable Object global token bucket + Queue concurrency |
+Customer data lives in one SQLite Durable Object per account. A shared D1 control plane holds identities, reseller/account metadata, encrypted credentials, roles, hostnames, usage and audit records. R2 objects and queue jobs carry account identity. Sending uses a separate MailChannels sub-account key for each customer.
 
-This is a demonstration, not a production-ready bulk-mail product. You are responsible for recipient consent, anti-spam compliance, sender authentication, abuse prevention, data retention, and a load test that reflects your Cloudflare and MailChannels plans.
+## Run locally
 
-## What it demonstrates
-
-- A React operator console for campaigns, templates, recipient lists, ad hoc sends, and live delivery status.
-- Resumable, range-based CSV imports from R2 into D1. The parser supports quoted fields, quoted newlines, CRLF, escaped quotes, and UTF-8 split across chunks.
-- Campaign fan-out through Cloudflare Queues without loading an entire audience into one Worker invocation.
-- A D1 outbox that closes the database-to-queue loss window. Consumers are idempotent at the D1 boundary.
-- One MailChannels async request per recipient, giving every tracked recipient an unambiguous `request_id`.
-- Native MailChannels Mustache content using `dynamic_template_data` from each CSV row.
-- Native non-transactional unsubscribe behavior when a campaign has **Marketing unsubscribe** enabled.
-- Signed MailChannels webhook validation (content digest, five-minute replay window, Ed25519 public-key verification), immediate durable storage, and asynchronous event processing.
-- Per-recipient processed, delivered, hard-bounced, complained, open, click, unsubscribe, and failure state.
-- Automatic local suppression mirroring for hard bounces, complaints, and unsubscribes. MailChannels remains the delivery-time source of truth for suppression.
-- Exact account-level send-rate control via a Durable Object token bucket, even while Queue consumers autoscale.
-- Retry queues, DLQs, repair sweeps, stuck-send leases, raw webhook retention, and granular tracking expiry.
-
-## Architecture
-
-```mermaid
-flowchart LR
-  UI[React console\nWorkers Assets] --> API[Cloudflare Worker API]
-  Access[Cloudflare Access] --> API
-  API --> D1[(D1 control + tracking)]
-  API --> R2[(R2 CSVs + attachments)]
-  API --> CQ[Campaign Queue]
-  CQ --> Import[CSV import / campaign expander]
-  Import --> D1
-  Import --> Outbox[D1 delivery outbox]
-  Outbox --> EQ[Email Queue]
-  EQ --> Rate[Durable Object\ntoken bucket]
-  Rate --> MC[MailChannels\n/tx/v1/send-async]
-  MC --> Inbox[Recipient servers]
-  MC -->|signed batch webhook| Hook[Webhook receiver]
-  Hook --> D1
-  Hook --> EventQ[Event Queue]
-  EventQ --> D1
-  Cron[Cron repair + retention] --> D1
-  Cron --> CQ
+```sh
+npm ci
+npm run dev:local
 ```
 
-Read [docs/architecture.md](docs/architecture.md) for invariants, failure handling, and differences from the AWS implementation.
+Open `http://a.localhost:8790` for Account A, `http://b.localhost:8790` for Account B, and `http://platform.localhost:8790` for the platform console. Email capture is at `http://localhost:8790/__local/mailbox`.
 
-## CSV format
+The local environment uses real Workers storage, queues and alarms, with local test doubles for email and hostname providers. It requires no Cloudflare credentials and sends no real email. See [local development](docs/local-development.md) for provisioning and sending a complete campaign.
 
-The importer recognizes these headers (case, spaces, `_`, and `-` are ignored):
+## Features
 
-```csv
-email,first_name,last_name,topics,company,plan
-alice@example.net,Alice,Ng,"newsletter;customers",Acme,pro
-bob@example.net,Bob,Diaz,newsletter,Globex,starter
-```
+- Account isolation, scoped roles, host-bound sessions, magic links, invitations, OIDC and control-panel SSO.
+- Reseller linking, encrypted key rotation, resumable child provisioning, plans, lifecycle APIs and signed callbacks.
+- Resumable CSV import with consent, deduplication, hygiene flags and contact limits; templates and personalized campaigns.
+- Account pacing, reseller/platform ceilings, verified sender domains, tracking-domain DNS handoff and certificate warm-up.
+- Mandatory branded unsubscribe and postal footer, account-local suppressions, verified-recipient test sends and campaign attachment restrictions.
+- Time-boxed support sessions with an actor/effective-user audit trail.
+- Custom hostnames, theme tokens, logo/favicon assets, constrained CSS and branded system email.
+- Platform search, health, abuse controls, daily metering, provider usage snapshots, failed-job inspection/replay, export, retention and deletion.
 
-Every column is retained in `data_json` and can be used in a MailChannels Mustache template. Standard aliases are also supplied: `email`, `firstName`, `lastName`, and `topics`.
+## Verify
 
-```html
-<h1>Hello {{firstName}}</h1>
-<p>Your {{company}} account is on the {{plan}} plan.</p>
-```
-
-## Local development
-
-Requirements: Node.js 22+ and a Cloudflare account for full binding integration.
-
-```bash
-npm install
-cp .env.example .dev.vars
-npm run db:migrate:local
-npm run build
-npx wrangler dev
-```
-
-For the Vite UI with hot reload, run `npm run dev` separately. Vite proxies `/api` and `/webhooks` to Wrangler on port 8787.
-
-`AUTH_MODE=development` accepts `X-Dev-User-Email` and defaults to `developer@local.test`. Never deploy with development authentication.
-
-## Cloudflare deployment
-
-1. Create the backing resources:
-
-   ```bash
-   npx wrangler d1 create mass-email-system
-   npx wrangler r2 bucket create mass-email-system-content
-   npx wrangler queues create mass-email-campaigns
-   npx wrangler queues create mass-email-delivery
-   npx wrangler queues create mass-email-events
-   npx wrangler queues create mass-email-campaigns-dlq
-   npx wrangler queues create mass-email-delivery-dlq
-   npx wrangler queues create mass-email-events-dlq
-   ```
-
-2. Put the D1 UUID from the first command into `database_id` in `wrangler.jsonc`. Set `ALLOWED_EMAIL_DOMAIN`, `ALLOWED_SENDER_DOMAINS`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, and the desired `EMAIL_RATE_LIMIT`.
-
-3. Store secrets. Do not put either value in `wrangler.jsonc`:
-
-   ```bash
-   npx wrangler secret put MAILCHANNELS_API_KEY
-   npx wrangler secret put MAILCHANNELS_CUSTOMER_HANDLE
-   ```
-
-4. Apply the schema and deploy:
-
-   ```bash
-   npm install
-   npm run check
-   npm run db:migrate:remote
-   npm run deploy
-   ```
-
-5. Put the deployed hostname behind a Cloudflare Access self-hosted application. The Access application audience must match `CF_ACCESS_AUD`.
-
-6. Configure MailChannels:
-
-   - Add Domain Lockdown for each sending domain.
-   - Publish SPF, DKIM, and DMARC.
-   - Enroll `https://YOUR_HOST/webhooks/mailchannels` as the account webhook.
-   - Run the MailChannels webhook validation action and confirm a `202` response.
-
-MailChannels currently permits one webhook per account. The receiver checks `customer_handle`, so set it to the exact account (or sub-account) handle whose events this deployment accepts.
-
-## Configuration
-
-| Setting | Default | Purpose |
-|---|---:|---|
-| `EMAIL_RATE_LIMIT` | `50` | Global MailChannels requests/second enforced by the Durable Object. |
-| `CAMPAIGN_PAGE_SIZE` | `250` | D1 recipients copied into the campaign ledger per expansion job. |
-| `IMPORT_CHUNK_BYTES` | `524288` | R2 bytes parsed per resumable import job; capped in code at 2 MB. |
-| `TRACKING_RETENTION_DAYS` | `400` | Granular recipient and raw webhook retention; campaign summaries remain. |
-| `ALLOWED_SENDER_DOMAINS` | `example.com` | UI/API guardrail. MailChannels Domain Lockdown is authoritative. |
-| `ALLOWED_EMAIL_DOMAIN` | `example.com` | Additional operator-email restriction after Access JWT validation. |
-| `WEBHOOK_VERIFY_SIGNATURES` | `true` | Must stay true outside deliberately isolated local tests. |
-
-Queue `max_concurrency`, retry count, and DLQs are configured in `wrangler.jsonc`.
-
-## API compatibility
-
-The main resource shape follows the AWS sample under `/api`: `templates`, `send-email`, `campaigns`, `recipients-lists`, `generate-upload-url`, `topics`, and campaign detail/search. R2 upload tickets point back to an authenticated Worker `PUT` route instead of exposing R2 credentials or S3-compatible presigned URLs.
-
-See [docs/api.md](docs/api.md) for request bodies and responses.
-
-## Delivery semantics
-
-Cloudflare Queues provide at-least-once delivery. D1 claims and unique keys prevent duplicate queue messages from normally calling MailChannels twice. There is still an unavoidable distributed-systems edge: a Worker can terminate after MailChannels accepts a request but before D1 records its `request_id`. Retrying that recipient can send a duplicate because the Email API does not expose an idempotency-key contract. Production senders should assess this risk, monitor stuck leases/DLQs, and reconcile with MailChannels events before replaying ambiguous sends.
-
-## Verification
-
-```bash
+```sh
 npm run check
 npm run build
 ```
 
-The unit suite covers chunked CSV parsing, request validation helpers, and delivery-event behavior. Build and TypeScript checks validate both Worker and React code.
+The suite runs locally, including a 100,000-versus-100-recipient fairness test. Dependencies are pinned. Browser smoke testing is available with `npm run test:browser` while the local server is running.
+
+## Deployment configuration
+
+The repository does not deploy automatically. `wrangler.jsonc` declares control-plane D1, R2, queues, AccountDO and coarse rate limiters. Account schemas migrate lazily inside their objects; D1 migrations are in `migrations/control`.
+
+For a new deployment, configure the actual resource bindings, `PLATFORM_HOST`, Cloudflare Access issuer/audience, `BOOTSTRAP_OWNER_EMAIL`, and independent `KEY_ENCRYPTION_SECRET` (base64-encoded 32 random bytes) and `SESSION_SECRET` secrets. Custom-hostname integration additionally needs `CF_ZONE_ID` and a scoped `CF_API_TOKEN`. The first verified Access login matching the bootstrap email creates the initial platform owner. Subsequent reseller and customer onboarding uses the consoles.
+
+Parent email accounts are created separately and linked through the platform console. Customer sending keys are provisioned and encrypted in the control plane. A reseller configures a separate system-email key and sender for invitations; parent keys are used only for management. Keep `LOCAL_TEST` unset in deployed environments.
+
+The original single-tenant D1 migration remains as historical source material. The new control-plane migration does **not** automatically move an existing deployment's tenant rows into AccountDO. Existing data needs a planned export/import cutover; do not apply this as an in-place conversion of a live single-tenant database.
+
+Live provider/DNS/certificate validation, external security assessment and a production pilot remain outside the local validation performed here. See [implementation status](docs/multi-tenancy-status.md), [architecture](docs/architecture.md), and [API reference](docs/api.md).
+
+## CSV and templates
+
+```csv
+email,first_name,last_name,topics,company
+alice@example.net,Alice,Ng,newsletter,Acme
+```
+
+Columns are available as merge data, with standard aliases `email`, `firstName`, `lastName`, `topics`, `unsubscribe_url` and `postal_address`. Campaign expansion stores the source recipient ID and email rather than copying the complete merge row into every campaign.
 
 ## License
 
-MIT No Attribution (MIT-0). See [LICENSE](LICENSE). This repository is an independent semantic implementation; it does not copy the AWS sample's source code or branding.
+MIT No Attribution (MIT-0). See [LICENSE](LICENSE). This project originated as an independent Cloudflare/MailChannels implementation of the AWS sample mass email system.

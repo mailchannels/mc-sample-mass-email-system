@@ -1,6 +1,6 @@
 # White-label multi-tenancy plan
 
-Status: proposal, 2026-10-02. Nothing in this document is implemented yet.
+Status: Phases 0–6 implemented with local acceptance, 2026-10-02. See [implementation status](multi-tenancy-status.md) for evidence, implementation decisions and the live-validation boundary. This document preserves the original design and pre-implementation baseline; Phase 7 remains outstanding.
 
 This plan turns the single-tenant sample into a three-tier, white-labelled email marketing service hosted on Cloudflare:
 
@@ -10,7 +10,7 @@ This plan turns the single-tenant sample into a three-tier, white-labelled email
 | **Reseller** | Web hosting providers | Their own customer accounts, branding, hostname, and support access into those accounts. |
 | **Account** | Hosting customers | Their own lists, templates, campaigns, sender domains and users. |
 
-## 1. Starting point
+## 1. Starting point (pre-implementation)
 
 The current code is single-tenant by construction. The relevant facts:
 
