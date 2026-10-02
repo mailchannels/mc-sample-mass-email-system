@@ -8,46 +8,48 @@
   "vars": {
     "AUTH_MODE": "cloudflare-access",
     "ALLOWED_EMAIL_DOMAIN": "example.com",
-    "ALLOWED_SENDER_DOMAINS": "example.com",
+    "PLATFORM_HOST": "admin.example.com",
     "WEBHOOK_VERIFY_SIGNATURES": "true",
-    "TRACKING_RETENTION_DAYS": "400",
+    "TRACKING_RETENTION_DAYS": "90",
     "IMPORT_CHUNK_BYTES": "524288",
     "CAMPAIGN_PAGE_SIZE": "250",
-    "EMAIL_RATE_LIMIT": "50"
+    "EMAIL_RATE_LIMIT": "50",
   },
   "durable_objects": {
     "bindings": [
-      { "name": "RATE_LIMITER", "class_name": "EmailRateLimiter" }
-    ]
+      { "name": "ACCOUNTS", "class_name": "AccountDO" },
+      { "name": "RATE_LIMITER", "class_name": "EmailRateLimiter" },
+    ],
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["EmailRateLimiter"] }
+    { "tag": "v1", "new_sqlite_classes": ["EmailRateLimiter"] },
+    { "tag": "v2", "new_sqlite_classes": ["AccountDO"] },
   ],
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/webhooks/*"]
+    "run_worker_first": true,
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "mass-email-system",
       "database_id": "replace-with-d1-database-id",
-      "migrations_dir": "migrations"
-    }
+      "migrations_dir": "migrations/control",
+    },
   ],
   "r2_buckets": [
     {
       "binding": "CONTENT",
-      "bucket_name": "mass-email-system-content"
-    }
+      "bucket_name": "mass-email-system-content",
+    },
   ],
   "queues": {
     "producers": [
       { "binding": "CAMPAIGN_QUEUE", "queue": "mass-email-campaigns" },
       { "binding": "EMAIL_QUEUE", "queue": "mass-email-delivery" },
-      { "binding": "EVENT_QUEUE", "queue": "mass-email-events" }
+      { "binding": "EVENT_QUEUE", "queue": "mass-email-events" },
     ],
     "consumers": [
       {
@@ -56,7 +58,7 @@
         "max_batch_timeout": 2,
         "max_retries": 5,
         "dead_letter_queue": "mass-email-campaigns-dlq",
-        "max_concurrency": 5
+        "max_concurrency": 5,
       },
       {
         "queue": "mass-email-delivery",
@@ -64,7 +66,7 @@
         "max_batch_timeout": 1,
         "max_retries": 5,
         "dead_letter_queue": "mass-email-delivery-dlq",
-        "max_concurrency": 10
+        "max_concurrency": 10,
       },
       {
         "queue": "mass-email-events",
@@ -72,11 +74,11 @@
         "max_batch_timeout": 5,
         "max_retries": 5,
         "dead_letter_queue": "mass-email-events-dlq",
-        "max_concurrency": 5
-      }
-    ]
+        "max_concurrency": 5,
+      },
+    ],
   },
   "triggers": {
-    "crons": ["*/1 * * * *", "17 3 * * *"]
-  }
+    "crons": ["*/1 * * * *", "17 3 * * *"],
+  },
 }

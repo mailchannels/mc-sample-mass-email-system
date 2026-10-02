@@ -1,68 +1,73 @@
-# Architecture and correctness notes
+# Architecture and invariants
 
-## Behavioral target
+The [multi-tenancy plan](multi-tenancy-plan.md) describes the product decisions. This document describes the implementation through Phase 6.
 
-The AWS sample exposes six operator capabilities: authenticated UI access, SES-style template management, recipient CSV ingestion, individual sends, mass campaign orchestration, and per-recipient campaign monitoring. This project retains those capabilities while choosing primitives native to MailChannels and Cloudflare.
+```mermaid
+flowchart LR
+  Browser[Branded customer / reseller / platform console] --> Edge[Hostname + session + declared permission]
+  Edge --> Control[(D1 control plane)]
+  Edge --> Account[AccountDO — one SQLite store per account]
+  Account --> R2[(R2 acct/account-id prefix)]
+  Account --> CampaignQ[Account-tagged import and expansion jobs]
+  CampaignQ --> Account
+  Account -->|Alarm-paced outbox| DeliveryQ[Shared delivery queue]
+  DeliveryQ --> Account
+  Account --> Ceilings[Reseller + platform buckets]
+  Account -->|Customer sub-account key| Provider[Email provider]
+  Provider --> Signature[Signed webhook verification]
+  Signature --> Routing[Handle-to-account lookup]
+  Routing --> Account
+  Account --> Rollups[Daily usage + abuse metrics]
+  Rollups --> Control
+```
 
-The implementation intentionally does not reproduce CloudFormation stacks, AWS identity concepts, SES template storage, a Step Functions state machine, or one DynamoDB table per campaign. D1 is relational, so shared indexed tables are the natural Cloudflare representation.
+## Isolation and identity
 
-## Control flow
+- The Worker resolves every hostname before serving APIs or assets. A configured platform hostname is the only bootstrap exception; unknown customer hosts return 404.
+- Customer handlers receive `TenantContext`, including an account-local SQL store. They cannot query the control-plane database as a tenant store. `AccountDO` owns the SQLite adapter and lazy numbered migrations.
+- Queue messages require `accountId`. Consumers look up the account and select its jurisdiction before dispatching. Unknown jobs fail rather than silently succeeding.
+- R2 uploads use `acct/{accountId}/...`. Upload tickets are stored inside the owning AccountDO; guessing another account's ticket or resource ID cannot cross the object boundary.
+- The local SQL adapter preserves repeated numbered bindings and provides synchronous atomic batches inside `storage.transactionSync()`.
+- Account requests and alarms serialize across asynchronous work. Deletion first marks the control-plane account `DELETING`, then waits for the object to quiesce before removing provider data, objects and tenant storage.
 
-1. The browser obtains a short-lived upload ticket from the Worker and streams a CSV to an authenticated Worker route. The Worker streams it into R2.
-2. A campaign-queue job reads bounded R2 byte ranges. Parser state and the byte offset live in D1, so jobs can retry or continue without rereading the whole file.
-3. Launch creates an immutable campaign identity and computes the eligible audience after local suppression/topic filtering.
-4. Campaign expander jobs page through the source list. For every recipient they insert a campaign ledger row and a delivery-outbox row. Unique `(campaign_id, source_recipient_id)` and deterministic outbox keys make retries idempotent.
-5. The outbox flusher persists Email Queue messages before marking outbox rows dispatched. A crash between those steps may duplicate a queue message but cannot silently lose it.
-6. An Email Queue consumer acquires a token from the global Durable Object, claims a `PENDING` recipient, assembles R2 attachments, and calls MailChannels `POST /tx/v1/send-async` with exactly one personalization.
-7. The returned MailChannels `request_id` is written to the campaign recipient row. This is the join key for all later webhook events.
-8. The public webhook route verifies the content digest, signature timestamp, Ed25519 signature, and `customer_handle`. It stores the raw payload before acknowledging with `202`, then queues each event for state projection.
-9. Event consumers update timestamp flags and aggregate campaign counters idempotently. Hard bounces, complaints, and unsubscribes also enter the local suppression mirror.
-10. Cron repairs incomplete imports/expansions, republishes pending outbox work, re-leases stale sends, and applies retention.
+Sessions are random bearer IDs, hashed in D1 and sent in `__Host-session` cookies (`Secure`, `HttpOnly`, `SameSite=Lax`, no Domain). Magic links and SSO nonces are one-use. Cookie-authenticated writes require a same-origin request; upload-ticket creation receives the same protection despite its legacy GET route.
 
-## Key invariants
+Platform requests require a verified Cloudflare Access JWT, including issuer and audience. Reseller OIDC uses authorization code, PKCE, state bound to a browser cookie, nonce, signature/issuer/audience/expiry checks, verified email and an existing reseller invitation. Panel SSO uses a short-lived signed envelope bound to reseller, account and hostname.
 
-- A source recipient occurs at most once in a campaign: `UNIQUE(campaign_id, source_recipient_id)`.
-- An Email API request maps to at most one campaign recipient: unique `mailchannels_request_id`.
-- A webhook payload is stored before downstream processing.
-- Counters increment only when the corresponding recipient timestamp changes from `NULL`.
-- An outbox record is durable before a Queue message can exist.
-- The MailChannels API key never reaches the browser, D1, R2, logs, or configuration committed to Git.
-- Campaign summaries are not deleted when granular tracking reaches its retention date.
+Permissions are declared in code and fail closed. Scope roles do not implicitly become customer roles. Support access creates a 60-minute session with the real actor and effective account user; it denies user management, export and deletion. The actor's current role is rechecked. Writes record both identities.
 
-## State models
+## Provisioning and credentials
 
-Campaign: `PREPARING → RUNNING → COMPLETED | COMPLETED_WITH_ERRORS`.
+A reseller is linked to an externally created MailChannels parent. Listing sub-accounts validates the supplied management key before it is stored with AES-GCM encryption. Customer sends never fall back to a parent or global key.
 
-Recipient send path: `PENDING → SENDING → ACCEPTED | FAILED`. Delivery events can then project `PROCESSED`, `DELIVERED`, `BOUNCED`, `COMPLAINED`, `OPENED`, `CLICKED`, `UNSUBSCRIBED`, or `DROPPED`. Timestamp columns retain prior milestones when status advances.
+Provisioning journals the account and idempotency key, takes a retry lease, chooses a deterministic child handle, and advances through child creation, key issuance, mandatory webhook enrollment, sending limit and tracking-domain setup. A failure records an alert and suspends the partial child; retry resumes saved progress. Key persistence failures revoke the newly issued key. A successful retry activates the child only after its mandatory setup steps succeed.
 
-A campaign is send-complete once expansion is finished and every recipient is either accepted by MailChannels or has a permanent API failure. Delivery and engagement events continue to update after completion, matching the AWS sample's separation between send progress and downstream outcomes.
+Reseller integration keys are hashed, scope-limited and revocable. Panel and callback shared secrets, OIDC client secrets, parent keys and sending keys are encrypted. API and audit responses exclude credential values, except newly created integration credentials returned once to their owner.
 
-## Scaling boundaries
+## Delivery and fairness
 
-- CSV ingestion is chunked and does not hold the full file in Worker memory.
-- Campaign expansion is paginated and resumable.
-- Queue payloads contain identifiers, not message bodies or personal data beyond opaque IDs.
-- Attachments are loaded only by the sending Worker. This sample caps raw attachments at 20 MB so base64 encoding remains below MailChannels' 30 MB total-message limit and leaves Worker memory headroom.
-- A single D1 database is appropriate for the sample. Very large or multi-tenant production systems may shard by tenant, move analytical events to R2, or use Cloudflare Pipelines/Analytics Engine.
+Campaign expansion snapshots only email and source recipient ID. Merge fields are loaded from the source row at send time. Per-account alarms release a bounded number of outbox rows each second, so the remainder of a large campaign stays in its own object. Consumers also enforce reseller and platform ceilings.
 
-## Failure modes
+New accounts begin at at most five messages/second and 1,000 monthly messages, bounded by their plan. The rate and volume allowance rise to the plan after at least 1,000 accepted messages, seven days of age and no complaint history. Contact limits, mandatory consent attestation, address syntax, deduplication and hygiene flags are enforced on import.
 
-| Failure | Behavior |
-|---|---|
-| CSV job retry | Reprocesses its byte range; `INSERT OR IGNORE` prevents duplicate recipients. |
-| Expansion job retry | Deterministic ledger/outbox keys prevent duplicates. |
-| Crash after queue send, before outbox update | Queue message may duplicate; recipient claim allows one active send. |
-| MailChannels 429/5xx | Recipient returns to `PENDING`; Queue retry uses `Retry-After` or bounded delay. |
-| MailChannels 4xx | Recipient becomes `FAILED`; the campaign can complete with errors. |
-| Crash after Email API accepts, before D1 update | Ambiguous send; retry can duplicate. This cannot be eliminated without provider idempotency. |
-| Duplicate webhook | Event milestone columns prevent duplicate aggregate increments. Raw duplicate retention is acceptable for audit. |
-| Event projection failure | Event Queue retries and then DLQs; raw event remains `RECEIVED` for replay. |
-| Queue/database drift | One-minute repair sweep republishes stored offsets, cursors, and pending outbox work. |
+Sends claim a recipient conditionally before calling the provider. Acceptance/failure and campaign/batch counters are committed atomically. Duplicate queue jobs therefore do not normally issue a second send. Ambiguous network/server responses remain `SENDING`; repair adopts a matching `processed` event before considering a retry. After a one-hour grace period, one retry is allowed; a second ambiguity becomes `UNCONFIRMED`. The provider has no idempotency-key guarantee, so the residual crash-plus-lost-webhook duplicate window remains.
 
-## Security posture
+Campaigns are always non-transactional and include the account postal address and a signed unsubscribe link. Campaign attachments are disabled. Test messages are limited to verified account members and have a separate small rate bucket. Both campaign and test sends require an active account and a verified sender domain.
 
-Cloudflare Access JWTs are verified by the Worker, including signature, expiry, audience, and optional operator domain. This matters even when Access is configured at the edge because it avoids trusting a user-controlled identity header.
+## Events, tracking and abuse
 
-The webhook is intentionally outside Access. Its independent trust boundary is MailChannels' RFC 9421-style signed request plus an exact account-handle match. Raw bodies are hashed and verified before JSON processing.
+Signature verification precedes routing by `customer_handle`. Known events are durably stored in the account object, with raw payloads under its R2 prefix; unknown handles become operator alerts. Event fingerprints deduplicate callbacks. Operators can replay unknown-handle alerts after fixing the mapping.
 
-Deploy Cloudflare WAF rate-limit rules for operator APIs and the webhook, keep preview/development authentication off in production, scan user-supplied attachments for malware, and use separate MailChannels sub-accounts if tenants need reputation and quota isolation.
+Tracking activation registers the customer's own click/open domains, returns exact TXT/CNAME records, and uses a platform bucket of one new hostname per minute (180 per three hours). The first HTTPS request warms the certificate; both scopes can reuse that warm hostname. Tracking remains disabled until both scopes are active.
+
+One-click unsubscribe records the local suppression before attempting provider mirroring. A durable pending marker retries a failed mirror from the alarm. Hard bounces and complaints also suppress locally. A sliding 24-hour window with at least 100 accepted recipients triggers a pause at a 0.1% complaint rate or 5% hard-bounce rate. The first breach flags the account; a subsequent distinct breach after operator resumption suspends its provider sub-account.
+
+## Operations and lifecycle
+
+The platform console exposes accounts/resellers, staff, plans, global search, health alerts, provisioning retries, failed-job inspection/replay, abuse actions and usage export. Daily account totals are persisted separately from expiring recipient rows. Reseller rollups aggregate those totals. Provider billing-period snapshots are displayed separately; they are not mislabeled as daily usage.
+
+Maintenance processes bounded, rotating account batches and records per-account failures instead of aborting the whole fleet. Account alarms perform pacing, repair, suppression mirroring and daily retention. Cron checks for stalled alarms and handles control-plane provisioning, callbacks, metering and hostname revalidation.
+
+Retention defaults to 90 days and can be set to 7–365 days per account. Detailed campaign-recipient rows and raw webhook events expire; daily metering and campaign summaries remain. Contacts and original lists remain until explicitly deleted. Export streams JSON in bounded pages. Deletion removes the provider child, account R2 prefix, Durable Object contents, domain/provisioning/role/session records and encrypted child key. A redacted account tombstone and usage/audit records remain for non-PII routing/accounting continuity.
+
+Phase 7 remains responsible for live integration checks, external penetration testing, fleet-scale load testing and the hosting-provider pilot. Local TLS/DNS doubles establish application behavior, not real certificate or DNS issuance.

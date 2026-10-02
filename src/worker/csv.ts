@@ -89,7 +89,10 @@ export function parseCsvChunk(
   return { state, rows };
 }
 
-export function rowsToRecipients(rows: string[][], state: CsvParserState): RecipientInput[] {
+export function rowsToRecipients(
+  rows: string[][],
+  state: CsvParserState,
+): RecipientInput[] {
   const output: RecipientInput[] = [];
   for (const rawRow of rows) {
     const row = [...rawRow];
@@ -97,21 +100,34 @@ export function rowsToRecipients(rows: string[][], state: CsvParserState): Recip
       state.firstRow = false;
       row[0] = row[0]?.replace(/^\uFEFF/, "") ?? "";
       const normalized = row.map(normalizeHeader);
-      if (normalized.some((header) => ["email", "emailaddress"].includes(header))) {
+      if (
+        normalized.some((header) => ["email", "emailaddress"].includes(header))
+      ) {
         state.headers = normalized;
         continue;
       }
       state.headers = ["email", "firstname", "lastname", "topics"];
     }
 
-    const headers = state.headers ?? ["email", "firstname", "lastname", "topics"];
+    const headers = state.headers ?? [
+      "email",
+      "firstname",
+      "lastname",
+      "topics",
+    ];
     const record: Record<string, string> = {};
     headers.forEach((header, index) => {
       if (header) record[header] = row[index]?.trim() ?? "";
     });
-    const address = (record.email || record.emailaddress || row[0] || "").trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) continue;
-    const topics = (record.topics || record.topic || "").split(/[;,]/).map((item) => item.trim()).filter(Boolean);
+    const address = (record.email || record.emailaddress || row[0] || "")
+      .trim()
+      .toLowerCase();
+    if (address.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address))
+      continue;
+    const topics = (record.topics || record.topic || "")
+      .split(/[;,]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
     output.push({
       email: address,
       firstName: record.firstname || record.fname || record.first || "",
@@ -124,7 +140,11 @@ export function rowsToRecipients(rows: string[][], state: CsvParserState): Recip
 }
 
 function normalizeHeader(value: string): string {
-  return value.replace(/^\uFEFF/, "").trim().toLowerCase().replace(/[\s_-]/g, "");
+  return value
+    .replace(/^\uFEFF/, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]/g, "");
 }
 
 function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
